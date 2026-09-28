@@ -1,0 +1,36 @@
+name: Agente Meta Ads (automatico)
+on:
+  schedule:
+    - cron: "0 14 * * 1"   # reporte: lunes 14:00 UTC
+    - cron: "0 13 * * *"   # optimizador: diario 13:00 UTC
+  workflow_dispatch: {}      # boton "Run workflow" para probar
+
+env:
+  META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+  META_AD_ACCOUNT_ID: ${{ secrets.META_AD_ACCOUNT_ID }}
+  GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+  BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+  SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+  CLIENT_EMAIL: ${{ secrets.CLIENT_EMAIL }}
+  CPA_MAX: ${{ vars.CPA_MAX }}
+  DRY_RUN: ${{ vars.DRY_RUN }}
+
+jobs:
+  optimizar:
+    if: github.event.schedule == '0 13 * * *' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements.txt
+      - run: python optimizador.py
+  reporte:
+    if: github.event.schedule == '0 14 * * 1' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements.txt
+      - run: python reporte_semanal.py
