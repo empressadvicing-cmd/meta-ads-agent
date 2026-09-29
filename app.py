@@ -4,7 +4,7 @@ import os
 import streamlit as st
 from groq import Groq
 
- MODELO = "openai/gpt-oss-20b" 
+MODELO = "openai/gpt-oss-20b" 
 
 st.set_page_config(page_title="Agente Meta Ads", page_icon="📈", layout="wide")
 st.title("📈 Agente de IA para Meta Ads")
