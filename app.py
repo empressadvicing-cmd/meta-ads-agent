@@ -1,6 +1,7 @@
 import json
 import os
 
+import requests
 import streamlit as st
 from groq import Groq
 
@@ -25,6 +26,64 @@ if not api_key:
     st.sidebar.markdown("Consíguela gratis en [console.groq.com](https://console.groq.com)")
 
 client = Groq(api_key=api_key) if api_key else None
+
+# ---------------- Acceso por licencia (Lemon Squeezy) ----------------
+LS_PRODUCT_ID = os.getenv("LS_PRODUCT_ID") or _secret("LS_PRODUCT_ID")
+CHECKOUT_URL = os.getenv("CHECKOUT_URL") or _secret("CHECKOUT_URL")
+CANDADO_ACTIVO = bool(CHECKOUT_URL)  # si no configuras CHECKOUT_URL, la app queda abierta
+
+
+def validar_licencia(clave):
+    try:
+        r = requests.post(
+            "https://api.lemonsqueezy.com/v1/licenses/validate",
+            headers={"Accept": "application/json"},
+            data={"license_key": clave},
+            timeout=15,
+        )
+        d = r.json()
+    except Exception:
+        return False, None, None
+    if not d.get("valid"):
+        return False, None, None
+    meta = d.get("meta", {})
+    if LS_PRODUCT_ID and str(meta.get("product_id")) != str(LS_PRODUCT_ID):
+        return False, None, None
+    return True, meta.get("customer_email"), meta.get("product_id")
+
+
+if CANDADO_ACTIVO:
+    st.sidebar.markdown("### 🔑 Acceso completo")
+    clave = st.sidebar.text_input("Clave de licencia", type="password")
+    if clave and not st.session_state.get("pro"):
+        ok, correo, producto = validar_licencia(clave.strip())
+        if ok:
+            st.session_state["pro"] = True
+            st.session_state["cliente"] = correo
+            st.session_state["producto"] = producto
+        else:
+            st.sidebar.error("Clave no válida o vencida.")
+    if st.session_state.get("pro"):
+        st.sidebar.success("Acceso activo ✅")
+        if st.session_state.get("cliente"):
+            st.sidebar.caption(f"Cuenta: {st.session_state['cliente']}")
+        if not LS_PRODUCT_ID and st.session_state.get("producto"):
+            st.sidebar.info(f"Falta seguridad: agrega LS_PRODUCT_ID = \"{st.session_state['producto']}\" en los secrets.")
+    else:
+        st.sidebar.link_button("Obtener acceso", CHECKOUT_URL, type="primary")
+
+PRO = (not CANDADO_ACTIVO) or st.session_state.get("pro", False)
+
+
+def acceso_denegado(gratis=False):
+    """True si hay que bloquear. Con gratis=True se permite 1 uso de prueba por sesión."""
+    if PRO:
+        return False
+    if gratis and st.session_state.get("gratis_usos", 0) < 1:
+        return False
+    st.warning("🔒 Esta herramienta es parte del acceso completo. Obtén tu clave y pégala en la barra lateral.")
+    st.link_button("Obtener acceso", CHECKOUT_URL, type="primary", key=f"buy_{id(object())}")
+    return True
 
 
 def preguntar(system, user, json_mode=False):
@@ -53,6 +112,8 @@ with tab1:
             st.error("Falta la API key de Groq (barra lateral).")
         elif not descripcion.strip():
             st.warning("Describe el negocio primero.")
+        elif acceso_denegado(True):
+            pass
         else:
             with st.spinner("Diseñando campaña..."):
                 try:
@@ -64,6 +125,7 @@ with tab1:
 Genera 2 públicos y 3 anuncios en español.""",
                         descripcion, json_mode=True))
                     st.session_state["campana"] = campana
+                    st.session_state["gratis_usos"] = st.session_state.get("gratis_usos", 0) + 1
                 except Exception as e:
                     st.error(f"Error: {e}")
 
@@ -103,6 +165,8 @@ with tab2:
             st.error("Falta la API key de Groq.")
         elif not datos.strip():
             st.warning("Pega tus métricas primero.")
+        elif acceso_denegado(False):
+            pass
         else:
             with st.spinner("Analizando..."):
                 try:
@@ -129,6 +193,8 @@ with tab3:
             st.error("Falta la API key de Groq.")
         elif not datos_semana.strip():
             st.warning("Pega las métricas primero.")
+        elif acceso_denegado(False):
+            pass
         else:
             with st.spinner("Redactando reporte..."):
                 try:
@@ -157,6 +223,8 @@ with tab4:
             st.error("Falta la API key de Groq.")
         elif not desc_negocio.strip():
             st.warning("Describe el negocio primero.")
+        elif acceso_denegado(False):
+            pass
         else:
             with st.spinner("Creando publicaciones..."):
                 try:
@@ -187,6 +255,8 @@ with tab5:
             st.error("Falta la API key de Groq.")
         elif not tarea.strip():
             st.warning("Describe la tarea primero.")
+        elif acceso_denegado(False):
+            pass
         else:
             with st.spinner("Diseñando propuesta..."):
                 try:
