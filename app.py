@@ -1,5 +1,7 @@
+import hashlib
 import json
 import os
+from datetime import datetime, timedelta, timezone
 
 import requests
 import streamlit as st
@@ -27,52 +29,115 @@ if not api_key:
 
 client = Groq(api_key=api_key) if api_key else None
 
-# ---------------- Acceso por licencia (Lemon Squeezy) ----------------
-LS_PRODUCT_ID = os.getenv("LS_PRODUCT_ID") or _secret("LS_PRODUCT_ID")
-CHECKOUT_URL = os.getenv("CHECKOUT_URL") or _secret("CHECKOUT_URL")
-CANDADO_ACTIVO = bool(CHECKOUT_URL)  # si no configuras CHECKOUT_URL, la app queda abierta
+# ---------------- Acceso por suscripción mensual (Mercado Pago) ----------------
+MP_TOKEN = os.getenv("MP_ACCESS_TOKEN") or _secret("MP_ACCESS_TOKEN")
+APP_URL = os.getenv("APP_URL") or _secret("APP_URL")
+SALT = os.getenv("ACCESS_SALT") or _secret("ACCESS_SALT") or (MP_TOKEN or "sin-token")
+PRECIO = float(os.getenv("PRECIO_MXN") or _secret("PRECIO_MXN") or 387)
+DIAS_ACCESO = int(os.getenv("DIAS_ACCESO") or _secret("DIAS_ACCESO") or 30)
+CANDADO_ACTIVO = bool(MP_TOKEN)  # sin MP_ACCESS_TOKEN la app queda abierta
+MP_API = "https://api.mercadopago.com"
 
 
-def validar_licencia(clave):
+def referencia_cliente(correo, pin):
+    """Identificador privado del cliente: ligado a su correo + PIN (y a una sal secreta del servidor)."""
+    base = f"{correo.strip().lower()}|{pin.strip()}|{SALT}"
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()[:40]
+
+
+def crear_link_de_pago(ref):
+    """Crea el link de pago en Mercado Pago. Devuelve (url, error)."""
+    cuerpo = {
+        "items": [{"title": "Acceso mensual - Agente de IA", "quantity": 1,
+                   "unit_price": PRECIO, "currency_id": "MXN"}],
+        "external_reference": ref,
+    }
+    if APP_URL:
+        cuerpo["back_urls"] = {"success": APP_URL, "pending": APP_URL, "failure": APP_URL}
+        cuerpo["auto_return"] = "approved"
     try:
-        r = requests.post(
-            "https://api.lemonsqueezy.com/v1/licenses/validate",
-            headers={"Accept": "application/json"},
-            data={"license_key": clave},
-            timeout=15,
-        )
+        r = requests.post(f"{MP_API}/checkout/preferences", json=cuerpo, timeout=20,
+                          headers={"Authorization": f"Bearer {MP_TOKEN}"})
         d = r.json()
-    except Exception:
-        return False, None, None
-    if not d.get("valid"):
-        return False, None, None
-    meta = d.get("meta", {})
-    if LS_PRODUCT_ID and str(meta.get("product_id")) != str(LS_PRODUCT_ID):
-        return False, None, None
-    return True, meta.get("customer_email"), meta.get("product_id")
+    except Exception as e:
+        return None, f"No se pudo conectar con Mercado Pago ({e})"
+    if r.status_code >= 300 or not d.get("init_point"):
+        return None, f"Mercado Pago respondió {r.status_code}: {str(d)[:200]}"
+    return d["init_point"], None
+
+
+def consultar_pagos(ref):
+    """Pagos aprobados de este cliente. Devuelve (lista, error)."""
+    try:
+        r = requests.get(f"{MP_API}/v1/payments/search", timeout=20,
+                         headers={"Authorization": f"Bearer {MP_TOKEN}"},
+                         params={"external_reference": ref, "status": "approved", "limit": 50})
+        d = r.json()
+    except Exception as e:
+        return [], f"No se pudo conectar con Mercado Pago ({e})"
+    if r.status_code >= 300:
+        return [], f"Mercado Pago respondió {r.status_code}: {str(d)[:200]}"
+    return d.get("results", []), None
+
+
+def calcular_vencimiento(pagos, dias=30):
+    """Cada pago aprobado suma `dias` de acceso; si renueva antes de vencer, los días se acumulan."""
+    fechas = []
+    for p in pagos:
+        f = p.get("date_approved") or p.get("date_created")
+        if f:
+            fechas.append(datetime.fromisoformat(f.replace("Z", "+00:00")))
+    vence = None
+    for f in sorted(fechas):
+        inicio = f if (vence is None or f > vence) else vence
+        vence = inicio + timedelta(days=dias)
+    return vence
+
+
+def ahora():
+    return datetime.now(timezone.utc)
 
 
 if CANDADO_ACTIVO:
     st.sidebar.markdown("### 🔑 Acceso completo")
-    clave = st.sidebar.text_input("Clave de licencia", type="password")
-    if clave and not st.session_state.get("pro"):
-        ok, correo, producto = validar_licencia(clave.strip())
-        if ok:
-            st.session_state["pro"] = True
-            st.session_state["cliente"] = correo
-            st.session_state["producto"] = producto
-        else:
-            st.sidebar.error("Clave no válida o vencida.")
-    if st.session_state.get("pro"):
-        st.sidebar.success("Acceso activo ✅")
-        if st.session_state.get("cliente"):
-            st.sidebar.caption(f"Cuenta: {st.session_state['cliente']}")
-        if not LS_PRODUCT_ID and st.session_state.get("producto"):
-            st.sidebar.info(f"Falta seguridad: agrega LS_PRODUCT_ID = \"{st.session_state['producto']}\" en los secrets.")
-    else:
-        st.sidebar.link_button("Obtener acceso", CHECKOUT_URL, type="primary")
+    st.sidebar.caption(f"${PRECIO:,.0f} MXN por {DIAS_ACCESO} días. Usa siempre el mismo correo y PIN: con ellos se identifica tu pago.")
+    correo = st.sidebar.text_input("Tu correo")
+    pin = st.sidebar.text_input("Crea un PIN (mín. 4 caracteres)", type="password")
+    datos_ok = bool(correo.strip()) and len(pin.strip()) >= 4
+    ref = referencia_cliente(correo, pin) if datos_ok else None
 
-PRO = (not CANDADO_ACTIVO) or st.session_state.get("pro", False)
+    c1, c2 = st.sidebar.columns(2)
+    if c1.button("Verificar acceso", disabled=not datos_ok):
+        pagos, err = consultar_pagos(ref)
+        if err:
+            st.sidebar.error(err)
+        else:
+            vence = calcular_vencimiento(pagos, DIAS_ACCESO)
+            st.session_state["vence"] = vence
+            st.session_state["cliente"] = correo.strip().lower()
+            if vence is None:
+                st.sidebar.warning("Aún no encuentro un pago con ese correo y PIN.")
+    if c2.button("Pagar", disabled=not datos_ok):
+        url, err = crear_link_de_pago(ref)
+        if err:
+            st.sidebar.error(err)
+        else:
+            st.session_state["link_pago"] = url
+
+    if st.session_state.get("link_pago") and datos_ok:
+        st.sidebar.link_button(f"Ir a pagar ${PRECIO:,.0f} MXN", st.session_state["link_pago"], type="primary")
+        st.sidebar.caption("Al terminar, vuelve aquí y toca 'Verificar acceso'.")
+
+    vence = st.session_state.get("vence")
+    if vence and vence > ahora():
+        dias_restantes = (vence - ahora()).days
+        st.sidebar.success(f"Acceso activo ✅ ({dias_restantes} días restantes)")
+        st.sidebar.caption(f"Cuenta: {st.session_state.get('cliente')}")
+    elif vence:
+        st.sidebar.error(f"Tu acceso venció el {vence.strftime('%d/%m/%Y')}. Renueva con 'Pagar'.")
+
+_vence = st.session_state.get("vence")
+PRO = (not CANDADO_ACTIVO) or bool(_vence and _vence > ahora())
 
 
 def acceso_denegado(gratis=False):
@@ -81,8 +146,7 @@ def acceso_denegado(gratis=False):
         return False
     if gratis and st.session_state.get("gratis_usos", 0) < 1:
         return False
-    st.warning("🔒 Esta herramienta es parte del acceso completo. Obtén tu clave y pégala en la barra lateral.")
-    st.link_button("Obtener acceso", CHECKOUT_URL, type="primary", key=f"buy_{id(object())}")
+    st.warning("🔒 Esta herramienta es parte del acceso completo. Ingresa tu correo y PIN en la barra lateral, paga y toca 'Verificar acceso'.")
     return True
 
 
